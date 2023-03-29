@@ -367,17 +367,35 @@ let initAction = () => {
     setTimeout(() => {
         motor_control_message = 'zero';
 
-        setTimeout(() => {
-            motor_control_message = 'pan_down';
-
+        if (p_out < 0.01) {
             setTimeout(() => {
-                motor_control_message = 'pan_up';
+                motor_control_message = 'pan_down';
 
                 setTimeout(() => {
-                    motor_control_message = 'stop';
+                    motor_control_message = 'pan_up';
+
+                    setTimeout(() => {
+                        motor_control_message = 'stop';
+                    }, 2000);
                 }, 2000);
-            }, 2000);
-        }, 1000);
+            }, 1000);
+        }
+        else {
+            setTimeout(() => {
+                motor_control_message = 'zero';
+                setTimeout(() => {
+                    motor_control_message = 'pan_down';
+
+                    setTimeout(() => {
+                        motor_control_message = 'pan_up';
+
+                        setTimeout(() => {
+                            motor_control_message = 'stop';
+                        }, 2000);
+                    }, 2000);
+                }, 1000);
+            }, 500);
+        }
     }, 500);
 }
 
@@ -438,13 +456,15 @@ function pack_cmd() {
 
 let unpack_reply = () => {
     let id = parseInt(motor_return_msg.substring(9, 10), 16);
-    let p_int = parseInt(motor_return_msg.substring(10, 14), 16);
-    let v_int = parseInt(motor_return_msg.substring(14, 17), 16);
-    let i_int = parseInt(motor_return_msg.substring(17, 20), 16);
+    if (id === 0) {
+        let p_int = parseInt(motor_return_msg.substring(10, 14), 16);
+        let v_int = parseInt(motor_return_msg.substring(14, 17), 16);
+        let i_int = parseInt(motor_return_msg.substring(17, 20), 16);
 
-    p_out = uint_to_float(p_int, P_MIN, P_MAX, 16);
-    v_out = uint_to_float(v_int, V_MIN, V_MAX, 12);
-    t_out = uint_to_float(i_int, T_MIN, T_MAX, 12);
+        p_out = uint_to_float(p_int, P_MIN, P_MAX, 16);
+        v_out = uint_to_float(v_int, V_MIN, V_MAX, 12);
+        t_out = uint_to_float(i_int, T_MIN, T_MAX, 12);
+    }
 }
 
 //--------------- CAN special message ---------------
