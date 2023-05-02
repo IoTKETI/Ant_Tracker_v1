@@ -1,6 +1,24 @@
 const mqtt = require('mqtt');
+const fs = require('fs');
 const { nanoid } = require("nanoid");
 const { SerialPort } = require('serialport');
+
+let drone_info = {};
+try {
+    drone_info = JSON.parse(fs.readFileSync('../drone_info.json', 'utf8'));
+} catch (e) {
+    console.log('can not find [ ../drone_info.json ] file');
+    // drone_info.host = "gcs.iotocean.org"
+    // drone_info.drone = "Flight_2"
+    // drone_info.gcs = "KETI_MUV"
+    // drone_info.type = "ardupilot"
+    // drone_info.system_id = 1
+    // drone_info.update = "disable"
+    // drone_info.mission = {}
+    // drone_info.id = ae_name.flight
+
+    // fs.writeFileSync('../drone_info.json', JSON.stringify(drone_info, null, 4), 'utf8');
+}
 
 // ---------- set values ---------- 
 const PAN_CAN_ID = '000000010000';
@@ -30,7 +48,7 @@ let p_out = 0.000;
 let v_out = 0.000;
 let t_out = 0.000;
 
-let p_step = 0.02;
+let p_step = 0.01;
 let p_target = 0.0;
 
 let cw = 0;
@@ -43,8 +61,8 @@ let motormode = 2;
 let run_flag = '';
 let no_response_count = 0;
 
-let can_port_num = '/dev/ttyUSB0';
-// let can_port_num = 'COM6';
+// let can_port_num = '/dev/ttyUSB0';
+let can_port_num = 'COM5';
 let can_baudrate = '115200';
 let can_port = null;
 
@@ -53,13 +71,6 @@ let localmqtt = '';
 
 let localmqtt_message = '';
 let motor_control_message = '';
-
-
-let location_message = {}
-location_message.lat = 0.0;
-location_message.lon = 0.0;
-location_message.alt = 0.0;
-location_message.realt = 0.0;
 
 let myLatitude = 0.0;
 let myLongitude = 0.0;
@@ -73,9 +84,10 @@ let target_relative_altitude = '';
 
 let motor_return_msg = '';
 
-let sub_drone_data_topic = '/RF/TELE_HUB/drone';
-let sub_gps_location_topic = '/GPS/location';
+// let sub_drone_data_topic = '/RF/TELE_HUB/drone';
+let sub_drone_data_topic = '/gcs/TELE_HUB/drone/rf/' + drone_info.drone;
 let sub_motor_control_topic = '/Ant_Tracker/Control';
+let sub_gps_location_topic = '/GPS/location';
 
 let pub_motor_position_topic = '/Ant_Tracker/Motor_Pan';
 
@@ -84,7 +96,7 @@ let sitl_mqtt_host = 'gcs.iotocean.org';
 let sitlmqtt = '';
 
 let sitlmqtt_message = '';
-let sub_sitl_drone_data_topic = '/Mobius/KETI_GCS/Drone_Data/KETI_Simul_2';
+let sub_sitl_drone_data_topic = '/Mobius/KETI_GCS/Drone_Data/KETI_Simul_1';
 
 //------------- Can communication -------------
 function canPortOpening() {
@@ -111,22 +123,152 @@ function canPortOpening() {
 
 function canPortOpen() {
     console.log('canPort open. ' + can_port_num + ' Data rate: ' + can_baudrate);
+}
 
-    localMqttConnect(local_mqtt_host);
-    if (sitl_state === true) {
-        sitlMqttConnect(sitl_mqtt_host);
+function canPortClose() {
+    console.log('[pan] canPort closed.');
 
+    setTimeout(canPortOpening, 2000);
+}
+
+function canPortError(error) {
+    let error_str = error.toString();
+    console.log('[pan] canPort error: ' + error.message);
+    if (error_str.substring(0, 14) == "Error: Opening") {
+
+    } else {
+        console.log('[pan] canPort error : ' + error);
     }
 
+    setTimeout(canPortOpening, 2000);
+}
+
+let _msg = '';
+function canPortData(data) {
+    _msg += data.toString('hex').toLowerCase();
+
+    setInterval(() => {
+        if (_msg.length >= 24) {
+            if (_msg.substring(0, 10) === '0000000001' || _msg.substring(0, 10) === '0000000002') {
+                motor_return_msg = _msg.substring(0, 24);
+                _msg = _msg.substring(24, _msg.length);
+                // console.log('motor_return_msg: ', motor_return_msg);
+            }
+        }
+    }, 1);
+}
+
+//---------------------------------------------------
+
+//------------- local mqtt connect ------------------
+function localMqttConnect(host) {
+    let connectOptions = {
+        host: host,
+        port: 1883,
+        protocol: "mqtt",
+        keepalive: 10,
+        clientId: 'local_' + nanoid(15),
+        protocolId: "MQTT",
+        protocolVersion: 4,
+        clean: true,
+        reconnectPeriod: 2000,
+        connectTimeout: 2000,
+        rejectUnauthorized: false
+    }
+
+    localmqtt = mqtt.connect(connectOptions);
+
+    localmqtt.on('connect', function () {
+        localmqtt.subscribe(sub_drone_data_topic + '/#', () => {
+            console.log('[pan] localmqtt subscribed -> ', sub_drone_data_topic);
+        });
+        localmqtt.subscribe(sub_gps_location_topic + '/#', () => {
+            console.log('[pan] localmqtt subscribed -> ', sub_gps_location_topic);
+        });
+        localmqtt.subscribe(sub_motor_control_topic + '/#', () => {
+            console.log('[pan] localmqtt subscribed -> ', sub_motor_control_topic);
+        });
+    });
+
+    localmqtt.on('message', function (topic, message) {
+        // console.log('topic, message => ', topic, message);
+
+        if (topic == sub_motor_control_topic) {
+            motor_control_message = message.toString();
+            console.log(topic, motor_control_message);
+        } else if (topic.includes(sub_drone_data_topic) || topic === sub_gps_location_topic) {
+            localmqtt_message = message.toString('hex');
+            // console.log("Client1 topic => " + topic);
+            // console.log("Client1 message => " + drone_message);
+
+            try {
+                let ver = localmqtt_message.substring(0, 2);
+                let sysid = '';
+                let msgid = '';
+                let base_offset = 0;
+
+                if (ver == 'fd') {//MAV ver.1
+                    sysid = localmqtt_message.substring(10, 12).toLowerCase();
+                    msgid = localmqtt_message.substring(18, 20) + localmqtt_message.substring(16, 18) + localmqtt_message.substring(14, 16);
+                    base_offset = 28;
+                } else { //MAV ver.2
+                    sysid = localmqtt_message.substring(6, 8).toLowerCase();
+                    msgid = localmqtt_message.substring(10, 12).toLowerCase();
+                    base_offset = 20;
+                }
+
+                let sys_id = parseInt(sysid, 16);
+                let msg_id = parseInt(msgid, 16);
+
+                if (msg_id === 33) { // MAVLINK_MSG_ID_GLOBAL_POSITION_INT
+                    let lat = localmqtt_message.substring(base_offset, base_offset + 8).toLowerCase().toString();
+                    base_offset += 8;
+                    let lon = localmqtt_message.substring(base_offset, base_offset + 8).toLowerCase();
+                    base_offset += 8;
+                    let alt = localmqtt_message.substring(base_offset, base_offset + 8).toLowerCase();
+                    base_offset += 8;
+                    let relative_alt = localmqtt_message.substring(base_offset, base_offset + 8).toLowerCase();
+
+                    if (sys_id === 254) {
+                        myLatitude = Buffer.from(lat, 'hex').readInt32LE(0).toString() / 10000000;
+                        myLongitude = Buffer.from(lon, 'hex').readInt32LE(0).toString() / 10000000;
+                        myAltitude = Buffer.from(alt, 'hex').readInt32LE(0).toString() / 1000;
+                        myRelativeAltitude = Buffer.from(relative_alt, 'hex').readInt32LE(0).toString() / 1000;
+                        // console.log('myLatitude, myLongitude, myAltitude, myRelativeAltitude', myLatitude, myLongitude, myAltitude, myRelativeAltitude);
+
+                    } else {
+                        target_latitude = Buffer.from(lat, 'hex').readInt32LE(0).toString() / 10000000;
+                        target_longitude = Buffer.from(lon, 'hex').readInt32LE(0).toString() / 10000000;
+                        target_altitude = Buffer.from(alt, 'hex').readInt32LE(0).toString() / 1000;
+                        target_relative_altitude = Buffer.from(relative_alt, 'hex').readInt32LE(0).toString() / 1000;
+
+                        calcTargetPanAngle(target_latitude, target_longitude);
+                        // console.log('target_latitude, target_longitude, target_altitude, target_relative_altitude', target_latitude, target_longitude, target_altitude, target_relative_altitude);
+
+                    }
+                }
+            }
+            catch (e) {
+                console.log('[pan] localmqtt connect Error', e);
+            }
+        }
+    });
+
+    localmqtt.on('error', function (err) {
+        console.log('[pan] local mqtt connect error ' + err.message);
+        localmqtt = null;
+        setTimeout(localMqttConnect, 1000, local_mqtt_host);
+    });
+
+    runMotor();
+}
+//---------------------------------------------------
+
+function runMotor() {
     setTimeout(() => {
         motor_control_message = 'init';
     }, 3000);
 
-    setInterval(() => {
-        localmqtt.publish(pub_motor_position_topic, (p_out * 180 / Math.PI).toString(), () => {
-            // console.log('[pan] send Motor angle to GCS value: ', p_out * 180 / Math.PI)
-        });
-    }, 500);
 
     setTimeout(() => {
         setInterval(() => {
@@ -195,23 +337,11 @@ function canPortOpen() {
                     no_response_count = 0;
 
                     motor_return_msg = '';
-                    // console.log('[pan] -> + 'p_target, p_in, p_out, v_out, t_out);
+                    // console.log('[pan] -> + ', p_target, p_in, p_out, v_out, t_out);
                 }
-            }
+            } else if (motormode === 2) {
+                ExitMotorMode();
 
-            if (no_response_count > 48) {
-                console.log('[pan] no_response_count', no_response_count);
-                no_response_count = 0;
-                motormode = 2;
-            }
-        }, 20);
-    }, 1000);
-
-    setInterval(() => {
-        if (motormode === 2) {
-            ExitMotorMode();
-
-            setTimeout(() => {
                 if (motor_return_msg !== '') {
                     unpack_reply();
 
@@ -220,137 +350,25 @@ function canPortOpen() {
 
                     console.log('[pan] ExitMotorMode', p_in, p_out, v_out, t_out);
                 }
-            }, 500)
-        }
-    }, 1000);
-}
+            }
 
-function canPortClose() {
-    console.log('[pan] canPort closed.');
-
-    setTimeout(canPortOpening, 2000);
-}
-
-function canPortError(error) {
-    let error_str = error.toString();
-    console.log('[pan] canPort error: ' + error.message);
-    if (error_str.substring(0, 14) == "Error: Opening") {
-
-    } else {
-        console.log('[pan] canPort error : ' + error);
-    }
-
-    setTimeout(canPortOpening, 2000);
-}
-
-function canPortData(data) {
-    motor_return_msg = data.toString('hex').toLowerCase();
-}
-
-canPortOpening();
-//---------------------------------------------------
-
-//------------- local mqtt connect ------------------
-function localMqttConnect(host) {
-    let connectOptions = {
-        host: host,
-        port: 1883,
-        protocol: "mqtt",
-        keepalive: 10,
-        clientId: 'local_' + nanoid(15),
-        protocolId: "MQTT",
-        protocolVersion: 4,
-        clean: true,
-        reconnectPeriod: 2000,
-        connectTimeout: 2000,
-        rejectUnauthorized: false
-    }
-
-    localmqtt = mqtt.connect(connectOptions);
-
-    localmqtt.on('connect', function () {
-        localmqtt.subscribe(sub_drone_data_topic + '/#', () => {
-            console.log('[pan] localmqtt subscribed -> ', sub_drone_data_topic);
-        });
-        localmqtt.subscribe(sub_gps_location_topic + '/#', () => {
-            console.log('[pan] localmqtt subscribed -> ', sub_gps_location_topic);
-        });
-        localmqtt.subscribe(sub_motor_control_topic + '/#', () => {
-            console.log('[pan] localmqtt subscribed -> ', sub_motor_control_topic);
-        });
-    });
-
-    localmqtt.on('message', function (topic, message) {
-        // console.log('topic, message => ', topic, message);
-
-        if (topic == sub_motor_control_topic) {
-            motor_control_message = message.toString();
-            console.log(topic, motor_control_message);
-        } else if (topic === sub_drone_data_topic || topic === sub_gps_location_topic) {
-            localmqtt_message = message.toString('hex');
-            // console.log("Client1 topic => " + topic);
-            // console.log("Client1 message => " + drone_message);
+            if (no_response_count > 48) {
+                console.log('[pan] no_response_count', no_response_count);
+                no_response_count = 0;
+                motormode = 2;
+            }
 
             try {
-                let ver = localmqtt_message.substring(0, 2);
-                let sysid = '';
-                let msgid = '';
-                let base_offset = 0;
-
-                if (ver == 'fd') {//MAV ver.1
-                    sysid = localmqtt_message.substring(10, 12).toLowerCase();
-                    msgid = localmqtt_message.substring(18, 20) + localmqtt_message.substring(16, 18) + localmqtt_message.substring(14, 16);
-                    base_offset = 28;
-                } else { //MAV ver.2
-                    sysid = localmqtt_message.substring(6, 8).toLowerCase();
-                    msgid = localmqtt_message.substring(10, 12).toLowerCase();
-                    base_offset = 20;
-                }
-
-                let sys_id = parseInt(sysid, 16);
-                let msg_id = parseInt(msgid, 16);
-
-                if (msg_id === 33) { // MAVLINK_MSG_ID_GLOBAL_POSITION_INT
-                    let lat = localmqtt_message.substring(base_offset, base_offset + 8).toLowerCase().toString();
-                    base_offset += 8;
-                    let lon = localmqtt_message.substring(base_offset, base_offset + 8).toLowerCase();
-                    base_offset += 8;
-                    let alt = localmqtt_message.substring(base_offset, base_offset + 8).toLowerCase();
-                    base_offset += 8;
-                    let relative_alt = localmqtt_message.substring(base_offset, base_offset + 8).toLowerCase();
-
-                    if (sys_id === 254) {
-                        myLatitude = Buffer.from(lat, 'hex').readInt32LE(0).toString() / 10000000;
-                        myLongitude = Buffer.from(lon, 'hex').readInt32LE(0).toString() / 10000000;
-                        myAltitude = Buffer.from(alt, 'hex').readInt32LE(0).toString() / 1000;
-                        myRelativeAltitude = Buffer.from(relative_alt, 'hex').readInt32LE(0).toString() / 1000;
-                        // console.log('myLatitude, myLongitude, myAltitude, myRelativeAltitude', myLatitude, myLongitude, myAltitude, myRelativeAltitude);
-
-                    } else {
-                        target_latitude = Buffer.from(lat, 'hex').readInt32LE(0).toString() / 10000000;
-                        target_longitude = Buffer.from(lon, 'hex').readInt32LE(0).toString() / 10000000;
-                        target_altitude = Buffer.from(alt, 'hex').readInt32LE(0).toString() / 1000;
-                        target_relative_altitude = Buffer.from(relative_alt, 'hex').readInt32LE(0).toString() / 1000;
-
-                        calcTargetPanAngle(target_latitude, target_longitude)
-                        // console.log('target_latitude, target_longitude, target_altitude, target_relative_altitude', target_latitude, target_longitude, target_altitude, target_relative_altitude);
-
-                    }
-                }
+                localmqtt.publish(pub_motor_position_topic, (p_out * 180 / Math.PI).toString(), () => {
+                    // console.log('[pan] send Motor angle to GCS value: ', p_out * 180 / Math.PI)
+                });
+            } catch {
             }
-            catch (e) {
-                console.log('[pan] localmqtt connect Error', e);
-            }
-        }
-    });
+        }, 20);
+    }, 1000);
 
-    localmqtt.on('error', function (err) {
-        console.log('[pan] local mqtt connect error ' + err.message);
-        localmqtt = null;
-        setTimeout(localMqttConnect, 1000, local_mqtt_host);
-    });
 }
-//---------------------------------------------------
+
 let constrain = (_in, _min, _max) => {
     if (_in < _min) {
         return _min;
@@ -367,35 +385,17 @@ let initAction = () => {
     setTimeout(() => {
         motor_control_message = 'zero';
 
-        if (p_out < 0.01) {
+        setTimeout(() => {
+            motor_control_message = 'pan_down';
+
             setTimeout(() => {
-                motor_control_message = 'pan_down';
+                motor_control_message = 'pan_up';
 
                 setTimeout(() => {
-                    motor_control_message = 'pan_up';
-
-                    setTimeout(() => {
-                        motor_control_message = 'stop';
-                    }, 2000);
+                    motor_control_message = 'stop';
                 }, 2000);
-            }, 1000);
-        }
-        else {
-            setTimeout(() => {
-                motor_control_message = 'zero';
-                setTimeout(() => {
-                    motor_control_message = 'pan_down';
-
-                    setTimeout(() => {
-                        motor_control_message = 'pan_up';
-
-                        setTimeout(() => {
-                            motor_control_message = 'stop';
-                        }, 2000);
-                    }, 2000);
-                }, 1000);
-            }, 500);
-        }
+            }, 2000);
+        }, 1000);
     }, 500);
 }
 
@@ -494,7 +494,8 @@ function calcTargetPanAngle(targetLatitude, targetLongitude) {
     let x = Math.cos(radmyLatitude) * Math.sin(radTargetLatitude) - Math.sin(radmyLatitude) * Math.cos(radTargetLatitude) * Math.cos(radTargetLongitude - radMyLongitude);
     let θ = Math.atan2(y, x); // azimuth angle (radians)
 
-    turn_angle = (θ * 180 / Math.PI + 360) % 360; // azimuth angle (convert to degree)
+    let turn_target = Math.round((θ + p_offset) * 50) / 50;
+    turn_angle = (turn_target * 180 / Math.PI + 360) % 360; // azimuth angle (convert to degree)
 
     if (run_flag === 'reset') {
         run_flag = 'go';
@@ -546,9 +547,6 @@ function calcTargetPanAngle(targetLatitude, targetLongitude) {
         // console.log('-------------------------------');
     }
 }
-
-
-
 
 //------------- sitl mqtt connect ------------------
 function sitlMqttConnect(host) {
@@ -633,3 +631,10 @@ function sitlMqttConnect(host) {
     });
 }
 //---------------------------------------------------
+
+canPortOpening();
+localMqttConnect(local_mqtt_host);
+if (sitl_state === true) {
+    sitlMqttConnect(sitl_mqtt_host);
+
+}
