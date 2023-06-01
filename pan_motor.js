@@ -127,16 +127,14 @@ function canPortError(error) {
 let _msg = '';
 function canPortData(data) {
     _msg += data.toString('hex').toLowerCase();
-
-    setInterval(() => {
-        if (_msg.length >= 24) {
-            if (_msg.substring(0, 10) === '0000000001') {
-                motor_return_msg = _msg.substring(0, 24);
-                _msg = _msg.substring(24, _msg.length);
-                // console.log('motor_return_msg: ', motor_return_msg);
-            }
+    
+    if (_msg.length >= 24) {
+        if (_msg.substring(0, 10) === '0000000001') {
+            motor_return_msg = _msg.substring(0, 24);
+            _msg = _msg.substring(24, _msg.length);
+            // console.log('motor_return_msg: ', motor_return_msg);
         }
-    }, 1);
+    }
 }
 
 //---------------------------------------------------
